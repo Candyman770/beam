@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE PolyKinds #-}
@@ -12,6 +13,9 @@ module Database.Beam.Backend.SQL.Row
   , ColumnParseError(..), BeamRowReadError(..)
 
   , FromBackendRow(..)
+
+    -- * Exported so we can override defaults
+  , GFromBackendRow(..) -- for 'runSelectReturningList' and co
   ) where
 
 import           Database.Beam.Backend.SQL.Types
@@ -33,6 +37,7 @@ import           Data.Proxy
 #endif
 
 import           GHC.Generics
+import           GHC.Types (Type)
 import           GHC.TypeLits
 
 -- | The exact error encountered
@@ -60,7 +65,13 @@ data FromBackendRowF be f where
   ParseOneField :: (BackendFromField be a, Typeable a) => (a -> f) -> FromBackendRowF be f
   Alt :: FromBackendRowM be a -> FromBackendRowM be a -> (a -> f) -> FromBackendRowF be f
   FailParseWith :: BeamRowReadError -> FromBackendRowF be f
-deriving instance Functor (FromBackendRowF be)
+
+instance Functor (FromBackendRowF be) where
+  fmap f = \case
+    ParseOneField p -> ParseOneField $ f . p
+    Alt a b p -> Alt a b $ f . p
+    FailParseWith e -> FailParseWith e
+
 newtype FromBackendRowM be a = FromBackendRowM (F (FromBackendRowF be) a)
   deriving (Functor, Applicative)
 
@@ -103,7 +114,7 @@ class BeamBackend be => FromBackendRow be a where
   valuesNeeded :: Proxy be -> Proxy a -> Int
   valuesNeeded _ _ = 1
 
-class GFromBackendRow be (exposed :: * -> *) rep where
+class GFromBackendRow be (exposed :: Type -> Type) rep where
   gFromBackendRow :: Proxy exposed -> FromBackendRowM be (rep ())
   gValuesNeeded :: Proxy be -> Proxy exposed -> Proxy rep -> Int
 instance GFromBackendRow be e p => GFromBackendRow be (M1 t f e) (M1 t f p) where
@@ -168,6 +179,8 @@ instance ( BeamBackend be
   fromBackendRow = to <$> gFromBackendRow (Proxy @(Rep (Exposed a, Exposed b, Exposed c, Exposed d, Exposed e, Exposed f, Exposed g)))
   valuesNeeded be _ = valuesNeeded be (Proxy @a) + valuesNeeded be (Proxy @b) + valuesNeeded be (Proxy @c) + valuesNeeded be (Proxy @d) +
                       valuesNeeded be (Proxy @e) + valuesNeeded be (Proxy @f) + valuesNeeded be (Proxy @g)
+
+#if MIN_VERSION_base(4,16,0)
 instance ( BeamBackend be
          , FromBackendRow be a, FromBackendRow be b, FromBackendRow be c
          , FromBackendRow be d, FromBackendRow be e, FromBackendRow be f
@@ -176,6 +189,7 @@ instance ( BeamBackend be
   fromBackendRow = to <$> gFromBackendRow (Proxy @(Rep (Exposed a, Exposed b, Exposed c, Exposed d, Exposed e, Exposed f, Exposed g, Exposed h)))
   valuesNeeded be _ = valuesNeeded be (Proxy @a) + valuesNeeded be (Proxy @b) + valuesNeeded be (Proxy @c) + valuesNeeded be (Proxy @d) +
                       valuesNeeded be (Proxy @e) + valuesNeeded be (Proxy @f) + valuesNeeded be (Proxy @g) + valuesNeeded be (Proxy @h)
+#endif
 
 instance ( BeamBackend be, Generic (tbl Identity), Generic (tbl Exposed)
          , GFromBackendRow be (Rep (tbl Exposed)) (Rep (tbl Identity))) =>
@@ -198,8 +212,6 @@ instance (FromBackendRow be x, FromBackendRow be SqlNull) => FromBackendRow be (
                   (do SqlNull <- fromBackendRow
                       pure ()))
   valuesNeeded be _ = valuesNeeded be (Proxy @x)
-
-deriving instance Generic (a, b, c, d, e, f, g, h)
 
 instance (BeamBackend be, FromBackendRow be t) => FromBackendRow be (Tagged tag t) where
   fromBackendRow = Tagged <$> fromBackendRow
